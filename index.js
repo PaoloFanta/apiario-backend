@@ -16,75 +16,43 @@ const bucket = process.env.INFLUX_BUCKET;
 
 const influxDB = new InfluxDB({ url, token });
 const queryApi = influxDB.getQueryApi(org);
+const writeApi = influxDB.getWriteApi(org, bucket);
 
-// ===============================
-// ROOT
-// ===============================
+const PORT = process.env.PORT || 3000;
+
+/* ===============================
+   ROOT
+================================ */
 app.get("/", (req, res) => {
   res.send("Backend Apiario attivo 🚀");
 });
 
-// ===============================
-// LETTURA ULTIMO DATO
-// ===============================
-app.get("/api/ultima", async (req, res) => {
-
-  const apiKey = req.headers["x-api-key"];
-
-  if (!apiKey || apiKey !== process.env.API_KEY) {
-    return res.status(401).json({ error: "Non autorizzato" });
-  }
-
-  const fluxQuery = `
-    from(bucket: "${bucket}")
-      |> range(start: -7d)
-      |> filter(fn: (r) => r._measurement == "peso_arnia")
-      |> last()
-  `;
-
-  try {
-    const rows = await queryApi.collectRows(fluxQuery);
-    res.json(rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ===============================
-// SCRITTURA DATI DAL LILYGO
-// ===============================
+/* ===============================
+   SCRITTURA DATI BILANCIA
+================================ */
 app.post("/api/peso", async (req, res) => {
 
-  const apiKey = req.headers["x-api-key"];
-
-  if (!apiKey || apiKey !== process.env.API_KEY) {
+  if (req.headers["x-api-key"] !== process.env.API_KEY) {
     return res.status(401).json({ error: "Non autorizzato" });
   }
 
   const { arnia, peso, lat, lon } = req.body;
 
-  if (
-    arnia === undefined ||
-    peso === undefined ||
-    lat === undefined ||
-    lon === undefined
-  ) {
+  if (!arnia || peso == null || lat == null || lon == null) {
     return res.status(400).json({ error: "Dati mancanti" });
   }
 
   try {
-    const writeApi = influxDB.getWriteApi(org, bucket);
 
     const point = new Point("peso_arnia")
-      .tag("arnia", arnia.toString())
       .tag("apiario", "automatico")
-      .floatField("peso_kg", parseFloat(peso))
-      .floatField("lat", parseFloat(lat))
-      .floatField("lon", parseFloat(lon));
+      .tag("arnia", String(arnia))
+      .floatField("peso_kg", Number(peso))
+      .floatField("lat", Number(lat))
+      .floatField("lon", Number(lon));
 
     writeApi.writePoint(point);
-
-    await writeApi.close();
+    await writeApi.flush();
 
     res.json({ success: true });
 
@@ -93,9 +61,56 @@ app.post("/api/peso", async (req, res) => {
   }
 });
 
-// ===============================
-const PORT = process.env.PORT || 3000;
+/* ===============================
+   LETTURA ULTIMA MISURAZIONE
+================================ */
+app.get("/api/ultima", async (req, res) => {
 
+  if (req.headers["x-api-key"] !== process.env.API_KEY) {
+    return res.status(401).json({ error: "Non autorizzato" });
+  }
+
+  const fluxQuery = `
+    from(bucket: "${bucket}")
+      |> range(start: -7d)
+      |> filter(fn: (r) => r._measurement == "peso_arnia")
+      |> last()
+      |> pivot(
+          rowKey:["_time"],
+          columnKey: ["_field"],
+          valueColumn: "_value"
+      )
+  `;
+
+  try {
+
+    const rows = await queryApi.collectRows(fluxQuery);
+
+    if (rows.length === 0) {
+      return res.json({ message: "Nessun dato trovato" });
+    }
+
+    const r = rows[0];
+
+    const result = {
+      arnia: r.arnia,
+      apiario: r.apiario,
+      peso_kg: r.peso_kg,
+      lat: r.lat,
+      lon: r.lon,
+      time: r._time
+    };
+
+    res.json(result);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/* ===============================
+   AVVIO SERVER
+================================ */
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
