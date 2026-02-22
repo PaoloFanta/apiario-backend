@@ -20,9 +20,9 @@ const writeApi = influxDB.getWriteApi(org, bucket);
 
 const PORT = process.env.PORT || 3000;
 
-/* ===============================
-   FUNZIONE NORMALIZZAZIONE FASCIA
-================================ */
+/* =========================================
+   FUNZIONE: determina fascia oraria
+========================================= */
 function determinaFascia(dateObj) {
   const hour = dateObj.getHours();
 
@@ -33,16 +33,16 @@ function determinaFascia(dateObj) {
   return null;
 }
 
-/* ===============================
+/* =========================================
    ROOT
-================================ */
+========================================= */
 app.get("/", (req, res) => {
   res.send("Backend Apiario attivo 🚀");
 });
 
-/* ===============================
-   SCRITTURA DATI DAL LILYGO
-================================ */
+/* =========================================
+   POST /api/peso
+========================================= */
 app.post("/api/peso", async (req, res) => {
 
   if (req.headers["x-api-key"] !== process.env.API_KEY) {
@@ -64,7 +64,7 @@ app.post("/api/peso", async (req, res) => {
       return res.status(400).json({ error: "Orario fuori fascia valida" });
     }
 
-    // Costruisco timestamp normalizzato (09:00 / 14:00 / 21:00)
+    // Timestamp normalizzato (09:00 / 14:00 / 21:00)
     const dataNormalizzata = new Date(dataOriginale);
     dataNormalizzata.setHours(parseInt(fascia));
     dataNormalizzata.setMinutes(0);
@@ -74,21 +74,18 @@ app.post("/api/peso", async (req, res) => {
     let melari = 1;
     let incremento = 0;
 
-    // Se è fascia 21 calcolo incremento giornaliero
+    // Solo fascia 21 calcola incremento
     if (fascia === "21") {
-
-      const ieri = new Date(dataNormalizzata);
-      ieri.setDate(ieri.getDate() - 1);
 
       const fluxQuery = `
         from(bucket: "${bucket}")
-          |> range(start: -2d)
+          |> range(start: -10d)
           |> filter(fn: (r) => r._measurement == "peso_arnia")
           |> filter(fn: (r) => r._field == "peso_kg")
           |> filter(fn: (r) => r.fascia == "21")
           |> filter(fn: (r) => r.arnia == "${arnia}")
           |> sort(columns: ["_time"], desc: true)
-          |> limit(n:2)
+          |> limit(n:1)
       `;
 
       const rows = await queryApi.collectRows(fluxQuery);
@@ -97,10 +94,26 @@ app.post("/api/peso", async (req, res) => {
         const pesoIeri = rows[0]._value;
         incremento = Number(peso) - Number(pesoIeri);
 
+        // Recupero ultimo numero melari
+        const fluxMelari = `
+          from(bucket: "${bucket}")
+            |> range(start: -10d)
+            |> filter(fn: (r) => r._measurement == "peso_arnia")
+            |> filter(fn: (r) => r._field == "melari")
+            |> filter(fn: (r) => r.fascia == "21")
+            |> filter(fn: (r) => r.arnia == "${arnia}")
+            |> sort(columns: ["_time"], desc: true)
+            |> limit(n:1)
+        `;
+
+        const melariRows = await queryApi.collectRows(fluxMelari);
+
+        if (melariRows.length > 0) {
+          melari = Number(melariRows[0]._value);
+        }
+
         if (incremento > 10) {
-          melari = rows[0].melari ? Number(rows[0].melari) + 1 : 2;
-        } else {
-          melari = rows[0].melari ? Number(rows[0].melari) : 1;
+          melari += 1;
         }
       }
     }
@@ -126,9 +139,9 @@ app.post("/api/peso", async (req, res) => {
   }
 });
 
-/* ===============================
-   STATO ARNI A (solo fascia 21)
-================================ */
+/* =========================================
+   GET /api/stato  (ultima fascia 21)
+========================================= */
 app.get("/api/stato", async (req, res) => {
 
   if (req.headers["x-api-key"] !== process.env.API_KEY) {
@@ -137,10 +150,11 @@ app.get("/api/stato", async (req, res) => {
 
   const fluxQuery = `
     from(bucket: "${bucket}")
-      |> range(start: -7d)
+      |> range(start: -10d)
       |> filter(fn: (r) => r._measurement == "peso_arnia")
       |> filter(fn: (r) => r.fascia == "21")
-      |> last()
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n:1)
       |> pivot(
           rowKey:["_time"],
           columnKey: ["_field"],
@@ -173,7 +187,51 @@ app.get("/api/stato", async (req, res) => {
   }
 });
 
-/* =============================== */
+/* =========================================
+   GET /api/storico  (ultimi 10 giorni fascia 21)
+========================================= */
+app.get("/api/storico", async (req, res) => {
+
+  if (req.headers["x-api-key"] !== process.env.API_KEY) {
+    return res.status(401).json({ error: "Non autorizzato" });
+  }
+
+  const fluxQuery = `
+    from(bucket: "${bucket}")
+      |> range(start: -10d)
+      |> filter(fn: (r) => r._measurement == "peso_arnia")
+      |> filter(fn: (r) => r.fascia == "21")
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n:10)
+      |> pivot(
+          rowKey:["_time"],
+          columnKey: ["_field"],
+          valueColumn: "_value"
+      )
+  `;
+
+  try {
+
+    const rows = await queryApi.collectRows(fluxQuery);
+
+    const result = rows.map(r => ({
+      arnia: r.arnia,
+      peso_kg: r.peso_kg,
+      incremento_kg: r.incremento_kg,
+      melari: r.melari,
+      lat: r.lat,
+      lon: r.lon,
+      time: r._time
+    }));
+
+    res.json(result);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/* ========================================= */
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
