@@ -7,6 +7,7 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const url = process.env.INFLUX_URL;
 const token = process.env.INFLUX_TOKEN;
@@ -21,6 +22,13 @@ app.get("/", (req, res) => {
 });
 
 app.get("/api/ultima", async (req, res) => {
+
+  const apiKey = req.headers["x-api-key"];
+
+  if (!apiKey || apiKey !== process.env.API_KEY) {
+    return res.status(401).json({ error: "Non autorizzato" });
+  }
+
   const fluxQuery = `
     from(bucket: "${bucket}")
       |> range(start: -7d)
@@ -28,20 +36,16 @@ app.get("/api/ultima", async (req, res) => {
       |> last()
   `;
 
-  let result = [];
-
   try {
-    await queryApi.collectRows(fluxQuery).then((rows) => {
-      result = rows;
-    });
-
-    res.json(result);
+    const rows = await queryApi.collectRows(fluxQuery);
+    res.json(rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
